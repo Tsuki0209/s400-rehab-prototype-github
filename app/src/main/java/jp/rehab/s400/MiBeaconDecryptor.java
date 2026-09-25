@@ -36,18 +36,14 @@ final class MiBeaconDecryptor {
 
             this.plaintext = plaintext;
             this.error = error;
-
             this.frameControl = frameControl;
             this.version = version;
-
             this.objectIncluded = objectIncluded;
             this.capabilityIncluded = capabilityIncluded;
             this.macIncluded = macIncluded;
             this.encrypted = encrypted;
-
             this.productId = productId;
             this.frameCounter = frameCounter;
-
             this.nonceMacHex = nonceMacHex;
             this.extCounterHex = extCounterHex;
         }
@@ -65,13 +61,11 @@ final class MiBeaconDecryptor {
         this.scaleMac = parseMac(scaleMacText);
 
         if (bindKey.length != 16) {
-            throw new IllegalArgumentException(
-                    "bindkey must be 16 bytes");
+            throw new IllegalArgumentException("bindkey must be 16 bytes");
         }
 
         if (scaleMac.length != 6) {
-            throw new IllegalArgumentException(
-                    "MAC must be 6 bytes");
+            throw new IllegalArgumentException("MAC must be 6 bytes");
         }
     }
 
@@ -112,13 +106,6 @@ final class MiBeaconDecryptor {
                 );
             }
 
-            /*
-             * MiBeacon:
-             *
-             * byte 0-1 : frame control
-             * byte 2-3 : product id
-             * byte 4   : frame counter
-             */
             frameControl =
                     (frame[0] & 0xFF)
                     | ((frame[1] & 0xFF) << 8);
@@ -145,6 +132,9 @@ final class MiBeaconDecryptor {
 
             int idx = 5;
 
+            /*
+             * Objectなしのフレームは測定データではない。
+             */
             if (!objectIncluded) {
                 return fail(
                         "object flag is not set",
@@ -162,12 +152,8 @@ final class MiBeaconDecryptor {
             }
 
             /*
-             * MAC
-             *
-             * MiBeaconのnonceでは広告に入っているMACの6バイトを
-             * そのまま使用する。
-             *
-             * 以前の実装ではここを逆順にしていた。
+             * MiBeacon nonceのMACは、基本的に
+             * 広告内の6バイトをそのまま使用する。
              */
             byte[] xiaomiMac;
 
@@ -203,10 +189,6 @@ final class MiBeaconDecryptor {
 
             } else {
 
-                /*
-                 * S400では測定フレーム側にMACが含まれない場合が
-                 * あるため、設定されたスケールMACを使う。
-                 */
                 xiaomiMac = scaleMac.clone();
             }
 
@@ -233,14 +215,11 @@ final class MiBeaconDecryptor {
                     );
                 }
 
-                int capability =
-                        frame[idx] & 0xFF;
-
+                int capability = frame[idx] & 0xFF;
                 idx++;
 
                 /*
-                 * IO capabilityが存在する場合、
-                 * 追加で2バイト。
+                 * IO capabilityが存在する場合は2バイト追加。
                  */
                 if ((capability & 0x20) != 0) {
 
@@ -292,11 +271,11 @@ final class MiBeaconDecryptor {
             }
 
             /*
-             * 暗号化フレーム
+             * 暗号化フレーム:
              *
-             * 最後の7バイト:
-             *   3 bytes extended frame counter
-             *   4 bytes MIC
+             * [payload]
+             * [extended counter 3 bytes]
+             * [MIC 4 bytes]
              */
             if (frame.length < idx + 7) {
                 return fail(
@@ -327,11 +306,12 @@ final class MiBeaconDecryptor {
             extCounterHex = toHex(extCounter);
 
             /*
-             * AES-CCM nonce:
+             * nonce:
              *
-             * 0..5   = MAC
-             * 6..8   = PID + frame counter
-             * 9..11  = extended frame counter
+             * 0..5   MAC
+             * 6..7   PID
+             * 8     frame counter
+             * 9..11  extended counter
              */
             byte[] nonce = new byte[12];
 
@@ -359,9 +339,6 @@ final class MiBeaconDecryptor {
                     3
             );
 
-            /*
-             * 暗号文
-             */
             byte[] ciphertext =
                     copyOfRange(
                             frame,
@@ -369,9 +346,6 @@ final class MiBeaconDecryptor {
                             extCounterStart
                     );
 
-            /*
-             * MIC
-             */
             byte[] mic =
                     copyOfRange(
                             frame,
@@ -379,11 +353,6 @@ final class MiBeaconDecryptor {
                             frame.length
                     );
 
-            /*
-             * AesCcm.decrypt() は
-             * ciphertext + tag
-             * を受け取る。
-             */
             byte[] withTag =
                     new byte[
                             ciphertext.length + mic.length
@@ -406,41 +375,105 @@ final class MiBeaconDecryptor {
             );
 
             /*
-             * MiBeacon AAD = 0x11
+             * 正規のMACでまず復号。
              */
-            byte[] plain =
-                    AesCcm.decrypt(
-                            bindKey,
-                            nonce,
-                            new byte[]{0x11},
-                            withTag,
-                            4
+            try {
+
+                byte[] plain =
+                        AesCcm.decrypt(
+                                bindKey,
+                                nonce,
+                                new byte[]{0x11},
+                                withTag,
+                                4
+                        );
+
+                return success(
+                        plain,
+                        frameControl,
+                        version,
+                        objectIncluded,
+                        capabilityIncluded,
+                        macIncluded,
+                        encrypted,
+                        productId,
+                        frameCounter,
+                        nonceMacHex,
+                        extCounterHex
+                );
+
+            } catch (Exception first) {
+
+                /*
+                 * 診断用フォールバック。
+                 *
+                 * 通常はこちらを使うべきではないが、
+                 * MACのバイト順差異を切り分けるために
+                 * 逆順MACでも一度だけ試す。
+                 */
+                byte[] reversedMac =
+                        reverseCopy(xiaomiMac);
+
+                System.arraycopy(
+                        reversedMac,
+                        0,
+                        nonce,
+                        0,
+                        6
+                );
+
+                try {
+
+                    byte[] plain =
+                            AesCcm.decrypt(
+                                    bindKey,
+                                    nonce,
+                                    new byte[]{0x11},
+                                    withTag,
+                                    4
+                            );
+
+                    return success(
+                            plain,
+                            frameControl,
+                            version,
+                            objectIncluded,
+                            capabilityIncluded,
+                            macIncluded,
+                            encrypted,
+                            productId,
+                            frameCounter,
+                            nonceMacHex + "(reversed)",
+                            extCounterHex
                     );
 
-            return success(
-                    plain,
-                    frameControl,
-                    version,
-                    objectIncluded,
-                    capabilityIncluded,
-                    macIncluded,
-                    encrypted,
-                    productId,
-                    frameCounter,
-                    nonceMacHex,
-                    extCounterHex
-            );
+                } catch (Exception second) {
+
+                    return fail(
+                            "CCM tag mismatch " +
+                            "[normal=" +
+                            safeMessage(first) +
+                            ", reversed=" +
+                            safeMessage(second) +
+                            "]",
+                            frameControl,
+                            version,
+                            objectIncluded,
+                            capabilityIncluded,
+                            macIncluded,
+                            encrypted,
+                            productId,
+                            frameCounter,
+                            nonceMacHex,
+                            extCounterHex
+                    );
+                }
+            }
 
         } catch (Exception e) {
 
-            String message = e.getMessage();
-
-            if (message == null || message.isEmpty()) {
-                message = e.getClass().getSimpleName();
-            }
-
             return fail(
-                    message,
+                    safeMessage(e),
                     frameControl,
                     version,
                     objectIncluded,
@@ -453,6 +486,16 @@ final class MiBeaconDecryptor {
                     extCounterHex
             );
         }
+    }
+
+    private static String safeMessage(Exception e) {
+        String message = e.getMessage();
+
+        if (message == null || message.isEmpty()) {
+            return e.getClass().getSimpleName();
+        }
+
+        return message;
     }
 
     private Result success(
@@ -533,7 +576,8 @@ final class MiBeaconDecryptor {
 
         if ((s.length() & 1) != 0) {
             throw new IllegalArgumentException(
-                    "odd hex length");
+                    "odd hex length"
+            );
         }
 
         byte[] out =
@@ -555,11 +599,25 @@ final class MiBeaconDecryptor {
 
             if (hi < 0 || lo < 0) {
                 throw new IllegalArgumentException(
-                        "invalid hex");
+                        "invalid hex"
+                );
             }
 
             out[i] =
                     (byte) ((hi << 4) | lo);
+        }
+
+        return out;
+    }
+
+    private static byte[] reverseCopy(byte[] data) {
+
+        byte[] out =
+                new byte[data.length];
+
+        for (int i = 0; i < data.length; i++) {
+            out[i] =
+                    data[data.length - 1 - i];
         }
 
         return out;

@@ -37,10 +37,10 @@ final class BleScanner {
 
     private int lastDebugScanCount;
 
-    private boolean firstFrameShown;
+    private boolean encryptedFrameShown;
 
     private String lastDecryptError = "";
-    private String frameInfo = "";
+    private String encryptedFrameInfo = "";
 
     BleScanner(
             Context context,
@@ -122,14 +122,11 @@ final class BleScanner {
 
         lastDebugScanCount = 0;
 
-        firstFrameShown = false;
+        encryptedFrameShown = false;
 
         lastDecryptError = "";
-        frameInfo = "";
+        encryptedFrameInfo = "";
 
-        /*
-         * 診断中は全BLE広告を取得する。
-         */
         scanner.startScan(
                 null,
                 settings,
@@ -175,7 +172,9 @@ final class BleScanner {
         byte[] frame =
                 result
                         .getScanRecord()
-                        .getServiceData(MIBEACON_UUID);
+                        .getServiceData(
+                                MIBEACON_UUID
+                        );
 
         if (frame == null) {
             debugThrottled();
@@ -188,11 +187,13 @@ final class BleScanner {
                 decryptor.decryptDetailed(frame);
 
         /*
-         * 最初に見つけたFE95広告の詳細を表示。
+         * 非暗号化フレームは測定フレームではない場合がある。
+         * 今回はEncrypted=1のフレームを優先して診断する。
          */
-        if (!firstFrameShown) {
+        if (decoded.encrypted
+                && !encryptedFrameShown) {
 
-            firstFrameShown = true;
+            encryptedFrameShown = true;
 
             String deviceMac =
                     result.getDevice() != null
@@ -201,22 +202,25 @@ final class BleScanner {
                                     .getAddress()
                             : "?";
 
-            frameInfo =
+            encryptedFrameInfo =
                     String.format(
                             Locale.US,
 
-                            "端末MAC=%s / FE95長=%d" +
-                            " / FC=0x%04X" +
-                            " / v=%d" +
-                            " / PID=0x%04X" +
-                            " / cnt=0x%02X" +
-                            " / obj=%d" +
-                            " / cap=%d" +
-                            " / mac=%d" +
-                            " / enc=%d" +
-                            " / nonceMAC=%s" +
-                            " / ext=%s" +
-                            " / err=%s",
+                            "暗号化MiBeacon:" +
+                            "\n端末MAC=%s" +
+                            "\nFE95長=%d" +
+                            "\nFC=0x%04X" +
+                            "\nv=%d" +
+                            "\nPID=0x%04X" +
+                            "\ncnt=0x%02X" +
+                            "\nobj=%d" +
+                            "\ncap=%d" +
+                            "\nmac=%d" +
+                            "\nenc=%d" +
+                            "\nnonceMAC=%s" +
+                            "\next=%s" +
+                            "\nraw=%s" +
+                            "\nerr=%s",
 
                             deviceMac,
 
@@ -254,12 +258,16 @@ final class BleScanner {
                                     ? "-"
                                     : decoded.extCounterHex,
 
+                            MiBeaconDecryptor.toHex(
+                                    frame
+                            ),
+
                             decoded.error == null
                                     ? "OK"
                                     : decoded.error
                     );
 
-            debug(frameInfo);
+            debug(encryptedFrameInfo);
         }
 
         /*
@@ -267,13 +275,14 @@ final class BleScanner {
          */
         if (!decoded.success()) {
 
-            lastDecryptError =
-                    decoded.error == null
-                            ? "unknown"
-                            : decoded.error;
+            if (decoded.encrypted) {
+                lastDecryptError =
+                        decoded.error == null
+                                ? "unknown"
+                                : decoded.error;
+            }
 
             debugThrottled();
-
             return;
         }
 
@@ -283,7 +292,9 @@ final class BleScanner {
         decryptSuccesses++;
 
         S400Measurement measurement =
-                parser.parse(decoded.plaintext);
+                parser.parse(
+                        decoded.plaintext
+                );
 
         if (measurement != null) {
 
@@ -307,9 +318,10 @@ final class BleScanner {
                     scanResults;
 
             String detail =
-                    frameInfo.isEmpty()
+                    encryptedFrameInfo.isEmpty()
                             ? ""
-                            : "\n" + frameInfo;
+                            : "\n"
+                              + encryptedFrameInfo;
 
             String error =
                     lastDecryptError.isEmpty()
